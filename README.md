@@ -20,3 +20,9 @@ Pixi turns photos of handwritten notebook pages into faithful spatial Markdown. 
 5. Start Pixi with `npm run dev`.
 
 The migration creates per-user notebooks and pages, private image storage, and row-level security policies.
+
+## Deploy to Vercel
+
+Import the GitHub repository into Vercel and keep the detected framework as Next.js. Add the four variables from `.env.example` to the Production, Preview, and Development environments. `OPENAI_API_KEY` must remain server-only; never prefix it with `NEXT_PUBLIC_`.
+
+Pixi uploads notebook images directly to private Supabase Storage, then sends only the storage path to the Vercel OCR function. This avoids Vercel request-body limits while the bucket still enforces a 20 MB image limit. The OCR function uses the Node.js runtime with a 120-second maximum duration.

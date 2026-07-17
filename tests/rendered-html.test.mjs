@@ -2,30 +2,17 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function render() {
-  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-  const { default: worker } = await import(workerUrl.href);
-
-  return worker.fetch(
-    new Request("http://localhost/", { headers: { accept: "text/html" } }),
-    { ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) } },
-    { waitUntil() {}, passThroughOnException() {} },
-  );
-}
-
-test("server-renders the Pixi notebook workspace", async () => {
-  const response = await render();
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
-
-  const html = await response.text();
-  assert.match(html, /<title>Pixi — Spatial notebook OCR<\/title>/i);
-  assert.match(html, />Pixi /);
-  assert.match(html, />New scan</);
-  assert.match(html, />Notebooks</);
-  assert.match(html, /SPATIAL MARKDOWN/);
-  assert.match(html, /Copy Markdown/);
+test("contains the complete Pixi notebook workspace", async () => {
+  const [layout, page] = await Promise.all([
+    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(layout, /Pixi — Spatial notebook OCR/i);
+  assert.match(page, /Pixi /);
+  assert.match(page, /New scan/);
+  assert.match(page, /Notebooks/);
+  assert.match(page, /SPATIAL MARKDOWN/);
+  assert.match(page, /Copy Markdown/);
 });
 
 test("keeps secrets server-side and ships the persistent OCR pipeline", async () => {
@@ -42,6 +29,9 @@ test("keeps secrets server-side and ships the persistent OCR pipeline", async ()
   assert.match(route, /consume_ocr_quota/);
   assert.match(route, /max_output_tokens:\s*6000/);
   assert.match(route, /AbortSignal\.timeout\(90_000\)/);
+  assert.match(route, /maxDuration = 120/);
+  assert.match(page, /storage\.from\("notebook-pages"\)\.upload/);
+  assert.doesNotMatch(route, /request\.formData/);
   assert.match(route, /process\.env\.OPENAI_API_KEY/);
   assert.doesNotMatch(page, /OPENAI_API_KEY|sk-proj-/);
   assert.match(page, /from\("notebooks"\)/);

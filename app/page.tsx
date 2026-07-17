@@ -206,7 +206,12 @@ export default function Home() {
   }
 
   async function loadFiles(files: File[]) {
-    const images = files.filter((file) => file.type.startsWith("image/"));
+    const allowedTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+    const images = files.filter((file) => allowedTypes.has(file.type) && file.size <= 20 * 1024 * 1024);
+    if (files.length && !images.length) {
+      setSyncMessage("Use a PNG, JPEG, WEBP, or GIF under 20 MB.");
+      return;
+    }
     if (!images.length || !activeNotebookId) return;
     let notebook = notebooks.find((item) => item.id === activeNotebookId);
     if (!notebook) return;
@@ -233,12 +238,21 @@ export default function Home() {
       setScanStage("scanning");
       setSyncMessage("Reading page...");
 
-      const form = new FormData();
-      form.set("image", image);
-      form.set("pageId", pageId);
+      const extension = image.name.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+      const imagePath = `${userId || (await sessionUser()).id}/${activeNotebookId}/${pageId}-${crypto.randomUUID()}.${extension}`;
       const started = Date.now();
       try {
-        const response = await fetch("/api/ocr", { method: "POST", body: form });
+        const supabase = createClient();
+        const { error: uploadError } = await supabase.storage.from("notebook-pages").upload(imagePath, image, {
+          contentType: image.type,
+          upsert: false,
+        });
+        if (uploadError) throw uploadError;
+        const response = await fetch("/api/ocr", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pageId, imagePath, imageName: image.name }),
+        });
         const result = await response.json();
         const wait = Math.max(0, 1900 - (Date.now() - started));
         if (wait) await new Promise((resolve) => window.setTimeout(resolve, wait));
@@ -252,6 +266,7 @@ export default function Home() {
         setScanStage("review");
         setSyncMessage("Ready to review");
       } catch (error) {
+        await createClient().storage.from("notebook-pages").remove([imagePath]);
         updateLocalPage(activeNotebookId, pageId, { status: "error", blank: false });
         setScanStage("empty");
         setSyncMessage(error instanceof Error ? error.message : "Spatial OCR failed");
