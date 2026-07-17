@@ -39,12 +39,17 @@ test("keeps secrets server-side and ships the persistent OCR pipeline", async ()
   assert.match(route, /https:\/\/api\.openai\.com\/v1\/responses/);
   assert.match(route, /detail:\s*"original"/);
   assert.match(route, /type:\s*"json_schema"/);
+  assert.match(route, /consume_ocr_quota/);
+  assert.match(route, /max_output_tokens:\s*6000/);
+  assert.match(route, /AbortSignal\.timeout\(90_000\)/);
   assert.match(route, /process\.env\.OPENAI_API_KEY/);
   assert.doesNotMatch(page, /OPENAI_API_KEY|sk-proj-/);
   assert.match(page, /from\("notebooks"\)/);
   assert.match(page, /from\("pages"\)/);
   assert.match(page, /\/api\/ocr/);
   assert.match(migration, /enable row level security/i);
+  assert.match(migration, /create or replace function public\.consume_ocr_quota/);
+  assert.match(migration, /grant execute on function public\.consume_ocr_quota\(\) to authenticated/);
   assert.match(migration, /notebook-pages/);
   assert.match(gitignore, /^\.env\*/m);
 });

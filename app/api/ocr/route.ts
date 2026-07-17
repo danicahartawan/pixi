@@ -2,7 +2,15 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/utils/supabase/server";
 
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_MARKDOWN_CHARS = 100_000;
 const ALLOWED_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+
+function json(body: unknown, status = 200, headers?: HeadersInit) {
+  return NextResponse.json(body, {
+    status,
+    headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...headers },
+  });
+}
 
 const spatialSchema = {
   type: "object",
@@ -70,26 +78,37 @@ function responseText(payload: Record<string, unknown>) {
 export async function POST(request: Request) {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Please start a Pixi session first." }, { status: 401 });
+  if (!user) return json({ error: "Please start a Pixi session first." }, 401);
 
   const form = await request.formData();
   const image = form.get("image");
   const pageId = String(form.get("pageId") || "");
 
   if (!(image instanceof File) || !pageId) {
-    return NextResponse.json({ error: "An image and page id are required." }, { status: 400 });
+    return json({ error: "An image and page id are required." }, 400);
   }
   if (!ALLOWED_TYPES.has(image.type) || image.size > MAX_IMAGE_BYTES) {
-    return NextResponse.json({ error: "Use a PNG, JPEG, WEBP, or GIF under 20 MB." }, { status: 400 });
+    return json({ error: "Use a PNG, JPEG, WEBP, or GIF under 20 MB." }, 400);
   }
 
   const { data: page } = await supabase
     .from("pages")
-    .select("id, notebook_id")
+    .select("id, notebook_id, image_path")
     .eq("id", pageId)
     .eq("user_id", user.id)
     .maybeSingle();
-  if (!page) return NextResponse.json({ error: "Page not found." }, { status: 404 });
+  if (!page) return json({ error: "Page not found." }, 404);
+
+  const { data: quota, error: quotaError } = await supabase.rpc("consume_ocr_quota").single();
+  if (quotaError) return json({ error: "OCR quota service is unavailable." }, 503);
+  if (!quota?.allowed) {
+    const resetAt = new Date(quota?.reset_at || Date.now() + 60 * 60 * 1000);
+    const retryAfter = Math.max(1, Math.ceil((resetAt.getTime() - Date.now()) / 1000));
+    return json({ error: "You have reached the limit of 10 scans per hour.", resetAt: resetAt.toISOString() }, 429, {
+      "Retry-After": String(retryAfter),
+      "X-RateLimit-Remaining": "0",
+    });
+  }
 
   await supabase.from("pages").update({ status: "processing", error_message: null }).eq("id", pageId);
 
@@ -101,19 +120,19 @@ export async function POST(request: Request) {
   });
   if (uploadError) {
     await supabase.from("pages").update({ status: "error", error_message: uploadError.message }).eq("id", pageId);
-    return NextResponse.json({ error: uploadError.message }, { status: 500 });
+    return json({ error: uploadError.message }, 500);
   }
 
   const { data: signed } = await supabase.storage.from("notebook-pages").createSignedUrl(imagePath, 60 * 10);
   if (!signed?.signedUrl) {
     await supabase.from("pages").update({ status: "error", error_message: "Could not read the uploaded image." }).eq("id", pageId);
-    return NextResponse.json({ error: "Could not read the uploaded image." }, { status: 500 });
+    return json({ error: "Could not read the uploaded image." }, 500);
   }
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     await supabase.from("pages").update({ status: "error", image_path: imagePath, error_message: "OPENAI_API_KEY is missing." }).eq("id", pageId);
-    return NextResponse.json({ error: "OpenAI is not configured." }, { status: 503 });
+    return json({ error: "OpenAI is not configured." }, 503);
   }
 
   try {
@@ -141,7 +160,9 @@ export async function POST(request: Request) {
             schema: spatialSchema,
           },
         },
+        max_output_tokens: 6000,
       }),
+      signal: AbortSignal.timeout(90_000),
     });
 
     const raw = await openaiResponse.json() as Record<string, unknown>;
@@ -161,6 +182,9 @@ export async function POST(request: Request) {
       confidence: number;
       blocks: unknown[];
     };
+    if (!result.markdown || result.markdown.length > MAX_MARKDOWN_CHARS || !Array.isArray(result.blocks) || result.blocks.length > 500) {
+      throw new Error("The OCR response exceeded Pixi's safe output limits.");
+    }
 
     const { data: updated, error: updateError } = await supabase
       .from("pages")
@@ -179,10 +203,16 @@ export async function POST(request: Request) {
       .single();
     if (updateError) throw updateError;
 
-    return NextResponse.json({ page: updated, imageUrl: signed.signedUrl });
+    if (page.image_path && page.image_path !== imagePath) {
+      await supabase.storage.from("notebook-pages").remove([page.image_path]);
+    }
+
+    return json({ page: updated, imageUrl: signed.signedUrl }, 200, {
+      "X-RateLimit-Remaining": String(quota.remaining),
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Spatial OCR failed.";
     await supabase.from("pages").update({ status: "error", image_path: imagePath, error_message: message }).eq("id", pageId);
-    return NextResponse.json({ error: message }, { status: 500 });
+    return json({ error: message }, 500);
   }
 }
