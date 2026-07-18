@@ -63,6 +63,7 @@ export default function Home() {
   const [addingNotebook, setAddingNotebook] = useState(false);
   const [newNotebookName, setNewNotebookName] = useState("");
   const [userId, setUserId] = useState("");
+  const [localOcrMode, setLocalOcrMode] = useState(false);
   const [syncMessage, setSyncMessage] = useState("Connecting...");
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -144,7 +145,12 @@ export default function Home() {
       setScanStage(stageFor(firstPage));
       setSyncMessage("Synced");
     } catch (error) {
-      setSyncMessage(error instanceof Error ? error.message : "Backend unavailable");
+      if (process.env.NODE_ENV === "development") {
+        setLocalOcrMode(true);
+        setSyncMessage("Local OCR mode");
+      } else {
+        setSyncMessage(error instanceof Error ? error.message : "Backend unavailable");
+      }
     }
   }
 
@@ -195,7 +201,16 @@ export default function Home() {
       setScanStage("empty");
       setSyncMessage("Synced");
     } catch (error) {
-      setSyncMessage(error instanceof Error ? error.message : "Could not add page");
+      if (process.env.NODE_ENV === "development") {
+        setLocalOcrMode(true);
+        setNotebooks((current) => current.map((item) => item.id === notebookId ? { ...item, pages: [...item.pages, page] } : item));
+        setActiveNotebookId(notebookId);
+        setActivePageId(page.id);
+        setScanStage("empty");
+        setSyncMessage("Local OCR mode");
+      } else {
+        setSyncMessage(error instanceof Error ? error.message : "Could not add page");
+      }
     }
   }
 
@@ -213,13 +228,21 @@ export default function Home() {
       return;
     }
     if (!images.length || !activeNotebookId) return;
-    let currentUser: string;
+    let currentUser = "local";
+    let useLocalOcr = localOcrMode;
     try {
-      currentUser = userId || (await sessionUser()).id;
-      setUserId(currentUser);
+      if (!useLocalOcr) {
+        currentUser = userId || (await sessionUser()).id;
+        setUserId(currentUser);
+      }
     } catch (error) {
-      setSyncMessage(error instanceof Error ? error.message : "Could not start a Pixi session");
-      return;
+      if (process.env.NODE_ENV !== "development") {
+        setSyncMessage(error instanceof Error ? error.message : "Could not start a Pixi session");
+        return;
+      }
+      useLocalOcr = true;
+      setLocalOcrMode(true);
+      setSyncMessage("Local OCR mode");
     }
     let notebook = notebooks.find((item) => item.id === activeNotebookId);
     if (!notebook) return;
@@ -229,11 +252,13 @@ export default function Home() {
       let page = index === 0 ? availableBlank : undefined;
       if (!page) {
         page = { id: crypto.randomUUID(), name: image.name.replace(/\.[^/.]+$/, ""), status: "blank", blank: true };
-        const { error } = await createClient().from("pages").insert({
-          id: page.id, notebook_id: activeNotebookId, user_id: currentUser, title: page.name,
-          position: notebook.pages.length + index, status: "blank",
-        });
-        if (error) { setSyncMessage(error.message); return; }
+        if (!useLocalOcr) {
+          const { error } = await createClient().from("pages").insert({
+            id: page.id, notebook_id: activeNotebookId, user_id: currentUser, title: page.name,
+            position: notebook.pages.length + index, status: "blank",
+          });
+          if (error) { setSyncMessage(error.message); return; }
+        }
         setNotebooks((current) => current.map((item) => item.id === activeNotebookId ? { ...item, pages: [...item.pages, page!] } : item));
       }
 
@@ -246,20 +271,27 @@ export default function Home() {
       setSyncMessage("Reading page...");
 
       const extension = image.name.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
-      const imagePath = `${currentUser}/${activeNotebookId}/${pageId}-${crypto.randomUUID()}.${extension}`;
+      const imagePath = useLocalOcr ? "" : `${currentUser}/${activeNotebookId}/${pageId}-${crypto.randomUUID()}.${extension}`;
       const started = Date.now();
       try {
-        const supabase = createClient();
-        const { error: uploadError } = await supabase.storage.from("notebook-pages").upload(imagePath, image, {
-          contentType: image.type,
-          upsert: false,
-        });
-        if (uploadError) throw uploadError;
-        const response = await fetch("/api/ocr", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pageId, imagePath, imageName: image.name }),
-        });
+        let response: Response;
+        if (useLocalOcr) {
+          const form = new FormData();
+          form.set("image", image);
+          response = await fetch("/api/ocr/local", { method: "POST", body: form });
+        } else {
+          const supabase = createClient();
+          const { error: uploadError } = await supabase.storage.from("notebook-pages").upload(imagePath, image, {
+            contentType: image.type,
+            upsert: false,
+          });
+          if (uploadError) throw uploadError;
+          response = await fetch("/api/ocr", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pageId, imagePath, imageName: image.name }),
+          });
+        }
         const result = await response.json();
         const wait = Math.max(0, 1900 - (Date.now() - started));
         if (wait) await new Promise((resolve) => window.setTimeout(resolve, wait));
@@ -273,7 +305,7 @@ export default function Home() {
         setScanStage("review");
         setSyncMessage("Ready to review");
       } catch (error) {
-        await createClient().storage.from("notebook-pages").remove([imagePath]);
+        if (!useLocalOcr && imagePath) await createClient().storage.from("notebook-pages").remove([imagePath]);
         updateLocalPage(activeNotebookId, pageId, { status: "error", blank: false });
         setScanStage("empty");
         setSyncMessage(error instanceof Error ? error.message : "Spatial OCR failed");
@@ -290,6 +322,12 @@ export default function Home() {
 
   async function confirmPage() {
     if (!activePage) return;
+    if (localOcrMode) {
+      updateLocalPage(activeNotebookId, activePage.id, { status: "confirmed" });
+      setScanStage("confirmed");
+      setSyncMessage("Saved locally");
+      return;
+    }
     const { error } = await createClient().from("pages")
       .update({ status: "confirmed", markdown: activePage.markdown, updated_at: new Date().toISOString() })
       .eq("id", activePage.id);

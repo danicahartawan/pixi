@@ -16,23 +16,27 @@ test("contains the complete Pixi notebook workspace", async () => {
 });
 
 test("keeps secrets server-side and ships the persistent OCR pipeline", async () => {
-  const [route, page, migration, gitignore] = await Promise.all([
+  const [route, localRoute, engine, page, migration, gitignore] = await Promise.all([
     readFile(new URL("../app/api/ocr/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/api/ocr/local/route.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/spatial-ocr.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../supabase/migrations/20260717200000_pixi_core.sql", import.meta.url), "utf8"),
     readFile(new URL("../.gitignore", import.meta.url), "utf8"),
   ]);
 
-  assert.match(route, /https:\/\/api\.openai\.com\/v1\/responses/);
-  assert.match(route, /detail:\s*"original"/);
-  assert.match(route, /type:\s*"json_schema"/);
+  assert.match(engine, /https:\/\/api\.openai\.com\/v1\/responses/);
+  assert.match(engine, /detail:\s*"original"/);
+  assert.match(engine, /type:\s*"json_schema"/);
   assert.match(route, /consume_ocr_quota/);
-  assert.match(route, /max_output_tokens:\s*6000/);
-  assert.match(route, /AbortSignal\.timeout\(90_000\)/);
+  assert.match(engine, /max_output_tokens:\s*6000/);
+  assert.match(engine, /AbortSignal\.timeout\(90_000\)/);
   assert.match(route, /maxDuration = 120/);
   assert.match(page, /storage\.from\("notebook-pages"\)\.upload/);
   assert.doesNotMatch(route, /request\.formData/);
-  assert.match(route, /process\.env\.OPENAI_API_KEY/);
+  assert.match(engine, /process\.env\.OPENAI_API_KEY/);
+  assert.match(localRoute, /process\.env\.NODE_ENV === "production"/);
+  assert.match(page, /\/api\/ocr\/local/);
   assert.doesNotMatch(page, /OPENAI_API_KEY|sk-proj-/);
   assert.match(page, /from\("notebooks"\)/);
   assert.match(page, /from\("pages"\)/);
