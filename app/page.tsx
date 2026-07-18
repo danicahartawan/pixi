@@ -213,6 +213,14 @@ export default function Home() {
       return;
     }
     if (!images.length || !activeNotebookId) return;
+    let currentUser: string;
+    try {
+      currentUser = userId || (await sessionUser()).id;
+      setUserId(currentUser);
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : "Could not start a Pixi session");
+      return;
+    }
     let notebook = notebooks.find((item) => item.id === activeNotebookId);
     if (!notebook) return;
     let availableBlank = notebook.pages.find((page) => page.id === activePageId && page.status === "blank");
@@ -221,7 +229,6 @@ export default function Home() {
       let page = index === 0 ? availableBlank : undefined;
       if (!page) {
         page = { id: crypto.randomUUID(), name: image.name.replace(/\.[^/.]+$/, ""), status: "blank", blank: true };
-        const currentUser = userId || (await sessionUser()).id;
         const { error } = await createClient().from("pages").insert({
           id: page.id, notebook_id: activeNotebookId, user_id: currentUser, title: page.name,
           position: notebook.pages.length + index, status: "blank",
@@ -239,7 +246,7 @@ export default function Home() {
       setSyncMessage("Reading page...");
 
       const extension = image.name.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
-      const imagePath = `${userId || (await sessionUser()).id}/${activeNotebookId}/${pageId}-${crypto.randomUUID()}.${extension}`;
+      const imagePath = `${currentUser}/${activeNotebookId}/${pageId}-${crypto.randomUUID()}.${extension}`;
       const started = Date.now();
       try {
         const supabase = createClient();
